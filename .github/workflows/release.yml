@@ -6,6 +6,16 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release with this build?'
+        required: false
+        default: false
+        type: boolean
+      tag_name:
+        description: 'Custom tag name for Release (e.g. v0.2.0). Required if create_release is true.'
+        required: false
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -40,19 +50,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload build artifacts
+      - name: Upload build artifacts (CI)
         uses: actions/upload-artifact@v4
         with:
-          name: supertech-photoprinter-windows
+          name: supertech-photoprinter-windows-installer
           path: |
             release/*.exe
             release/latest.yml
+          retention-days: 30
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: |
+          startsWith(github.ref, 'refs/tags/') ||
+          (github.event_name == 'workflow_dispatch' && inputs.create_release == 'true')
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          prerelease: false
           files: |
             release/*.exe
             release/latest.yml
           generate_release_notes: true
+          fail_on_unmatched_files: false
