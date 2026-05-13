@@ -28,6 +28,8 @@
   "build": {
     "appId": "com.supertech.photoprinter",
     "productName": "Supertech PhotoPrinter",
+    "compression": "maximum",
+    "removePackageScripts": true,
     "directories": {
       "output": "release"
     },
@@ -41,10 +43,6 @@
         {
           "target": "nsis",
           "arch": ["x64"]
-        },
-        {
-          "target": "portable",
-          "arch": ["x64"]
         }
       ]
     },
@@ -54,7 +52,8 @@
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "unicode": true
     },
     "extraMetadata": {
       "main": "dist-electron/main.js"

@@ -44,11 +44,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: supertech-photoprinter-windows
-          path: release/
+          path: |
+            release/*.exe
+            release/latest.yml
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: release/**
+          files: |
+            release/*.exe
+            release/latest.yml
           generate_release_notes: true
