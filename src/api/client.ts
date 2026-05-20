@@ -231,7 +231,22 @@ export const printClientApi = {
     return data.job
   },
 
-  report(settings: LocalSettings, jobId: string, status: PrintJob['status'], message?: string, localJobId?: string) {
+  async uploadRenderedImage(settings: LocalSettings, jobId: string, imageData: string, localJobId?: string) {
+    const imageBlob = await fetch(imageData).then((response) => response.blob())
+    const formData = new FormData()
+    formData.append('client_id', settings.clientId)
+    if (localJobId) formData.append('local_job_id', localJobId)
+    formData.append('image', imageBlob, `print-${jobId}.png`)
+
+    return request<{ ok: boolean; record_id: number; print_image_url: string }>(`/print-client/jobs/${jobId}/image`, {
+      settings,
+      method: 'POST',
+      headers: { 'X-Print-Client-Token': settings.clientToken },
+      body: formData,
+    })
+  },
+
+  report(settings: LocalSettings, jobId: string, status: PrintJob['status'], message?: string, localJobId?: string, printImageUrl?: string) {
     return request<{ ok: boolean; record_id: number; status: string }>(`/print-client/jobs/${jobId}/status`, {
       settings,
       method: 'POST',
@@ -241,6 +256,7 @@ export const printClientApi = {
         status,
         message,
         local_job_id: localJobId,
+        print_image_url: printImageUrl,
       }),
     })
   },

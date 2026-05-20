@@ -1379,10 +1379,16 @@ async function processJob(job: PrintJob) {
         dpi: job.dpi || 300,
         scaleMode: store.settings.scaleMode,
       }), 520000, '打印超时，请检查打印机状态')
+      const localJobId = String((printResult as Record<string, unknown>)?.localJobId || '')
+      job.lastMessage = '正在上传合成图'
+      upsertRecentJob(job)
+      await printClientApi.report(store.settings, job.id, 'printing', job.lastMessage, localJobId)
+      const uploadResult = await printClientApi.uploadRenderedImage(store.settings, job.id, render.dataUrl, localJobId)
       job.status = 'success'
       job.lastMessage = '打印完成'
+      job.printImageUrl = uploadResult.print_image_url
       upsertRecentJob(job)
-      await printClientApi.report(store.settings, job.id, 'success', job.lastMessage, String((printResult as Record<string, unknown>)?.localJobId || ''))
+      await printClientApi.report(store.settings, job.id, 'success', job.lastMessage, localJobId, uploadResult.print_image_url)
       await log('info', 'print job success', { jobId: job.id, orderNo: job.orderNo })
       await saveStore()
       return
