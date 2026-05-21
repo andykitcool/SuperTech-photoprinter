@@ -4,6 +4,38 @@ import fs from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
+// ── Suppress EPIPE crashes ──────────────────────────────────────────
+// When the parent terminal closes (e.g. launched via Start-Process),
+// stdout/stderr pipes break. Any console.log/error call would throw
+// EPIPE and crash the main process. We silence the error at the stream
+// level and also catch it in the wrapped console methods.
+process.stdout.on('error', () => { /* EPIPE - parent terminal closed */ })
+process.stderr.on('error', () => { /* EPIPE - parent terminal closed */ })
+
+const _origConsoleError = console.error.bind(console)
+const _origConsoleLog = console.log.bind(console)
+console.error = (...args: unknown[]) => { try { _origConsoleError(...args) } catch { /* EPIPE */ } }
+console.log = (...args: unknown[]) => { try { _origConsoleLog(...args) } catch { /* EPIPE */ } }
+
+// ── Global exception handler ────────────────────────────────────────
+process.on('uncaughtException', (error) => {
+  // Log to file before the process crashes
+  appendLog({
+    level: 'fatal',
+    message: error.message,
+    context: { stack: error.stack, name: error.name },
+    createdAt: new Date().toISOString(),
+  }).catch(() => { /* ignore */ })
+})
+process.on('unhandledRejection', (reason) => {
+  appendLog({
+    level: 'fatal',
+    message: String(reason),
+    context: { stack: reason instanceof Error ? reason.stack : undefined },
+    createdAt: new Date().toISOString(),
+  }).catch(() => { /* ignore */ })
+})
+
 type PrintImagePayload = {
   dataUrl: string
   printerName?: string
@@ -422,7 +454,18 @@ ipcMain.handle('printer:list', async (event) => {
 })
 
 ipcMain.handle('printer:print-image', async (_event, payload: PrintImagePayload) => {
-  return printImage(payload)
+  try {
+    return await printImage(payload)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    await appendLog({
+      level: 'error',
+      message: 'print-image IPC failed',
+      context: { error: msg, stack: error instanceof Error ? error.stack : undefined },
+      createdAt: new Date().toISOString(),
+    })
+    throw error
+  }
 })
 
 ipcMain.handle('app:write-log', async (_event, entry) => {
