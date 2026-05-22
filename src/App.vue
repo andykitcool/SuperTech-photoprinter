@@ -929,15 +929,20 @@ async function ensureClientSession(force = false) {
     credentialStatus.value = 'unauthenticated'
     return false
   }
-  if (store.settings.clientToken && !force) {
+  const parsedExpiresAt = store.settings.clientTokenExpiresAt ? Date.parse(store.settings.clientTokenExpiresAt) : 0
+  const expiresAt = Number.isFinite(parsedExpiresAt) ? parsedExpiresAt : 0
+  const tokenFresh = !expiresAt || expiresAt > Date.now() + 60_000
+  if (store.settings.clientToken && tokenFresh && !force) {
     credentialStatus.value = 'authenticated'
     credentialError.value = ''
     return true
   }
+  if (!tokenFresh) store.settings.clientToken = ''
   try {
     const session = await printClientApi.createSession(store.settings, auth.value)
     store.settings.clientToken = session.client_token
     store.settings.clientTokenIssuedAt = new Date().toISOString()
+    store.settings.clientTokenExpiresAt = session.expires_at || null
     credentialStatus.value = 'authenticated'
     credentialError.value = ''
     await saveStore()
@@ -953,6 +958,7 @@ async function logout() {
   stopListening()
   store.auth = null
   store.settings.clientToken = ''
+  store.settings.clientTokenExpiresAt = null
   credentialStatus.value = 'unauthenticated'
   credentialError.value = ''
   activeView.value = 'activities'
@@ -1339,6 +1345,9 @@ function upsertRecentJob(job: PrintJob) {
 async function processJob(job: PrintJob) {
   const attempts = Math.max(1, Number(store.settings.retryLimit || 0) + 1)
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let printAttempted = false
+    let localJobId = ''
+    let uploadedPrintImageUrl = job.printImageUrl || ''
     try {
       job.attempts = attempt
       job.status = 'rendering'
@@ -1350,10 +1359,26 @@ async function processJob(job: PrintJob) {
         60000,
         '渲染超时，请检查模版素材是否能访问',
       )
+      if (!uploadedPrintImageUrl) {
+        job.lastMessage = '正在上传合成图'
+        upsertRecentJob(job)
+        try {
+          const uploadResult = await printClientApi.uploadRenderedImage(store.settings, job.id, render.dataUrl)
+          uploadedPrintImageUrl = uploadResult.print_image_url
+          job.printImageUrl = uploadedPrintImageUrl
+        } catch (uploadError) {
+          const uploadText = uploadError instanceof Error ? uploadError.message : String(uploadError)
+          await log('warn', 'print render upload skipped before local print', {
+            jobId: job.id,
+            orderNo: job.orderNo,
+            error: uploadText,
+          })
+        }
+      }
       job.status = 'printing'
       job.lastMessage = '正在发送打印任务'
       upsertRecentJob(job)
-      await printClientApi.report(store.settings, job.id, 'printing', job.lastMessage)
+      await printClientApi.report(store.settings, job.id, 'printing', job.lastMessage, undefined, uploadedPrintImageUrl)
       if (!window.photoPrinter) throw new Error('当前环境不支持本地打印')
 
       // Resolve paper dimensions: prefer job data → match local template by sizeKey/pixel → pixel-based fallback
@@ -1368,6 +1393,7 @@ async function processJob(job: PrintJob) {
         : undefined
       const paperSize = jobPaper || templatePaper || fallbackPaper
 
+      printAttempted = true
       const printResult = await withTimeout(window.photoPrinter.printImage({
         dataUrl: render.dataUrl,
         printerName: store.settings.selectedPrinter,
@@ -1379,27 +1405,41 @@ async function processJob(job: PrintJob) {
         dpi: job.dpi || 300,
         scaleMode: store.settings.scaleMode,
       }), 520000, '打印超时，请检查打印机状态')
-      const localJobId = String((printResult as Record<string, unknown>)?.localJobId || '')
-      job.lastMessage = '正在上传合成图'
-      upsertRecentJob(job)
-      await printClientApi.report(store.settings, job.id, 'printing', job.lastMessage, localJobId)
-      const uploadResult = await printClientApi.uploadRenderedImage(store.settings, job.id, render.dataUrl, localJobId)
+      localJobId = String((printResult as Record<string, unknown>)?.localJobId || '')
       job.status = 'success'
-      job.lastMessage = '打印完成'
-      job.printImageUrl = uploadResult.print_image_url
+      job.lastMessage = '已提交到本地打印机'
       upsertRecentJob(job)
-      await printClientApi.report(store.settings, job.id, 'success', job.lastMessage, localJobId, uploadResult.print_image_url)
+      try {
+        await printClientApi.report(store.settings, job.id, 'success', job.lastMessage, localJobId, uploadedPrintImageUrl)
+      } catch (reportError) {
+        const reportText = reportError instanceof Error ? reportError.message : String(reportError)
+        printState.lastError = `本地已提交打印，成功状态回传失败：${reportText}`
+        await log('error', 'print job success report failed after local submit', {
+          jobId: job.id,
+          orderNo: job.orderNo,
+          localJobId,
+          error: reportText,
+        })
+      }
       await log('info', 'print job success', { jobId: job.id, orderNo: job.orderNo })
       await saveStore()
       return
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error)
       await log('error', 'print job failed', { jobId: job.id, attempt, error: text })
+      if (printAttempted) {
+        job.status = 'failed'
+        job.lastMessage = `本地打印提交失败或结果未知，已停止自动重试：${text}`
+        upsertRecentJob(job)
+        await printClientApi.report(store.settings, job.id, 'failed', job.lastMessage, localJobId || undefined, uploadedPrintImageUrl || undefined).catch(() => undefined)
+        await saveStore()
+        return
+      }
       if (attempt >= attempts) {
         job.status = 'failed'
         job.lastMessage = text
         upsertRecentJob(job)
-        await printClientApi.report(store.settings, job.id, 'failed', text).catch(() => undefined)
+        await printClientApi.report(store.settings, job.id, 'failed', text, undefined, uploadedPrintImageUrl || undefined).catch(() => undefined)
         await saveStore()
         return
       }
@@ -1442,6 +1482,13 @@ async function pollOnce() {
     printState.lastError = ''
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error)
+    if (error instanceof ApiError && [401, 403].includes(error.status)) {
+      store.settings.clientToken = ''
+      store.settings.clientTokenExpiresAt = null
+      credentialStatus.value = 'unauthenticated'
+      credentialError.value = friendlyErrorMessage(text)
+      await saveStore()
+    }
     printState.lastError = text
     await log('error', 'listener tick failed', { error: text })
   } finally {

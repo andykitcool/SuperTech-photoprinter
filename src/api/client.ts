@@ -21,7 +21,10 @@ export class ApiError extends Error {
 type RequestOptions = RequestInit & {
   auth?: AuthSession | null
   settings: LocalSettings
+  timeoutMs?: number
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 20000
 
 function apiRoot(settings: LocalSettings) {
   return `${settings.serverUrl.replace(/\/+$/, '')}/api`
@@ -29,26 +32,61 @@ function apiRoot(settings: LocalSettings) {
 
 async function parseResponse<T>(response: Response): Promise<T> {
   const text = await response.text()
-  const data = text ? JSON.parse(text) : null
+  let data: any = null
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      const preview = text.slice(0, 160).replace(/\s+/g, ' ').trim()
+      throw new ApiError(response.status, response.ok ? `服务端响应不是有效 JSON：${preview}` : preview || `HTTP ${response.status}`)
+    }
+  }
   if (!response.ok) {
-    const detail = data?.detail || data?.message || `HTTP ${response.status}`
+    const detail = data?.detail || data?.message || text || `HTTP ${response.status}`
     throw new ApiError(response.status, String(detail))
   }
   return data as T
 }
 
 async function request<T>(path: string, options: RequestOptions): Promise<T> {
+  const {
+    auth,
+    settings,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal,
+    ...fetchOptions
+  } = options
   const headers = new Headers(options.headers)
   if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  if (options.auth?.token) headers.set('Authorization', `Bearer ${options.auth.token}`)
+  if (auth?.token) headers.set('Authorization', `Bearer ${auth.token}`)
 
-  const response = await fetch(`${apiRoot(options.settings)}${path}`, {
-    ...options,
-    headers,
-  })
-  return parseResponse<T>(response)
+  const controller = new AbortController()
+  const abortFromUpstream = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', abortFromUpstream, { once: true })
+  }
+  const timer = window.setTimeout(() => controller.abort(), Math.max(1000, timeoutMs))
+
+  try {
+    const response = await fetch(`${apiRoot(settings)}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal,
+    })
+    return parseResponse<T>(response)
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError(0, `请求超时：${path}`)
+    }
+    throw new ApiError(0, error instanceof Error ? `网络请求失败：${error.message}` : '网络请求失败')
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', abortFromUpstream)
+  }
 }
 
 export const adminApi = {

@@ -48,6 +48,8 @@ type PrintImagePayload = {
   scaleMode?: 'contain' | 'cover'
 }
 
+const MAX_PRINT_DATA_URL_BYTES = 90 * 1024 * 1024
+
 type PrinterInfo = {
   name: string
   displayName?: string
@@ -139,12 +141,18 @@ function derivePaperSizeMm(widthPx?: number, heightPx?: number, dpi?: number) {
 }
 
 function dataUrlToImageFile(dataUrl: string) {
+  if (Buffer.byteLength(dataUrl, 'utf-8') > MAX_PRINT_DATA_URL_BYTES) {
+    throw new Error('Printable image data is too large')
+  }
   const match = dataUrl.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/)
   if (!match) {
     throw new Error('Missing printable image data')
   }
 
   const mimeSubtype = match[1].toLowerCase()
+  if (!['png', 'jpeg', 'jpg'].includes(mimeSubtype)) {
+    throw new Error(`Unsupported printable image type: ${mimeSubtype}`)
+  }
   const ext = mimeSubtype === 'jpeg' ? 'jpg' : mimeSubtype.replace(/[^a-z0-9]/g, '')
   return {
     ext: ext || 'png',
@@ -158,6 +166,10 @@ function comparablePrinterName(name: string) {
     .toLowerCase()
     .replace(/[^\x00-\x7F]+/g, '')
     .replace(/\s+/g, '')
+}
+
+function hasNonAscii(value: string) {
+  return /[^\x00-\x7F]/.test(value)
 }
 
 async function resolvePrinterName(requested?: string) {
@@ -186,7 +198,7 @@ async function resolvePrinterName(requested?: string) {
 
   const comparable = comparablePrinterName(printerName)
   const matched = windowsPrinters.find((printer) => comparablePrinterName(printer.name) === comparable)
-  if (matched) return matched.name
+  if (matched) return hasNonAscii(printerName) ? printerName : matched.name
 
   throw new Error(`Printer is unavailable: ${printerName}. Refresh printers in client settings and select it again.`)
 }
@@ -203,7 +215,7 @@ async function printViaPowerShell(imagePath: string, payload: PrintImagePayload)
   // PaperSize width/height are in hundredths of an inch
   const widthInch = Math.round(paperMm.widthMm / 25.4 * 100)
   const heightInch = Math.round(paperMm.heightMm / 25.4 * 100)
-  const copies = Math.max(1, Math.min(Number(payload.copies || 1), 99))
+  const copies = Math.max(1, Math.min(Math.floor(Number(payload.copies || 1)), 99))
 
   // Escape single quotes for PowerShell
   const safePath = imagePath.replace(/'/g, "''")
@@ -266,7 +278,7 @@ try {
       '-NoProfile',
       '-ExecutionPolicy', 'Bypass',
       '-Command', psScript,
-    ], { windowsHide: true, timeout: 60000 })
+    ], { windowsHide: true, timeout: 300000 })
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     await appendLog({
@@ -282,6 +294,12 @@ try {
 async function printImage(payload: PrintImagePayload) {
   if (!payload?.dataUrl?.startsWith('data:image/')) {
     throw new Error('Missing printable image data')
+  }
+  if (payload.widthPx && (payload.widthPx < 1 || payload.widthPx > 8000)) {
+    throw new Error('Printable image width is out of range')
+  }
+  if (payload.heightPx && (payload.heightPx < 1 || payload.heightPx > 8000)) {
+    throw new Error('Printable image height is out of range')
   }
 
   const localJobId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -401,12 +419,17 @@ async function getWindowsPrinters(): Promise<PrinterInfo[]> {
 }
 
 async function queryPrintersWithPowerShell(command: string, source: string): Promise<PrinterInfo[]> {
+  const utf8Command = [
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;',
+    '$OutputEncoding = [System.Text.Encoding]::UTF8;',
+    command,
+  ].join(' ')
   const { stdout } = await execFileAsync('powershell.exe', [
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
     '-Command',
-    command,
+    utf8Command,
   ], { windowsHide: true, timeout: 8000 })
 
   const text = stdout.trim()
@@ -495,4 +518,3 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-

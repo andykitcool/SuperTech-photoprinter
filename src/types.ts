@@ -21,6 +21,7 @@ export type LocalSettings = {
   clientName: string
   clientToken: string
   clientTokenIssuedAt?: string
+  clientTokenExpiresAt?: string | null
   pollingIntervalMs: number
   selectedPrinter: string
   scaleMode: 'contain' | 'cover'
