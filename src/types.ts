@@ -5,6 +5,8 @@ export type AuthSession = {
   username: string
   permissions: Permission[]
   roleCodes: string[]
+  tokenIssuedAt?: string
+  tokenExpiresAt?: string | null
 }
 
 export type PrinterInfo = {
@@ -28,6 +30,7 @@ export type LocalSettings = {
   copiesFallback: number
   retryLimit: number
   autoStart: boolean
+  lockPasswordHash: string
 }
 
 export type Activity = {
@@ -164,6 +167,7 @@ export type AppStore = {
   auth: AuthSession | null
   settings: LocalSettings
   recentJobs: PrintJob[]
+  locked: boolean
 }
 
 export type PrintLogEntry = {

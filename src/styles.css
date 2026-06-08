@@ -13,6 +13,7 @@ button { cursor: pointer; }
 
 .login-screen { min-height: 100vh; display: grid; place-items: center; padding: 32px; }
 .login-panel { width: min(440px, 100%); padding: 34px; border: 1px solid #e5e6eb; border-radius: 8px; background: #fff; box-shadow: 0 18px 48px rgba(29, 33, 41, 0.12); }
+.boot-panel { min-height: 132px; display: grid; align-content: center; }
 .brand-row { display: flex; align-items: center; gap: 14px; }
 .brand-row.compact { padding: 20px 18px; }
 .brand-mark { width: 44px; height: 44px; border-radius: 8px; display: grid; place-items: center; background: #1677ff; color: #fff; font-weight: 800; letter-spacing: 0; }
@@ -43,7 +44,29 @@ textarea { min-height: 240px; resize: vertical; font-family: "Cascadia Mono", Co
 .secondary-button, .ghost-button, .upload-button { border-color: #d8dce6; background: #fff; color: #1d2129; }
 .ghost-button { background: #f7f8fa; }
 .danger { color: #d92d20; border-color: #fecdca; }
+.lock-action { color: #175cd3; border-color: #b2ddff; background: #eff8ff; }
 .primary-button:disabled, .secondary-button:disabled { opacity: .55; cursor: not-allowed; }
+
+.lock-screen { min-height: 100vh; display: grid; grid-template-columns: 360px 1fr; gap: 18px; padding: 18px; background: #eef2f7; }
+.lock-status-panel, .lock-jobs-panel { border: 1px solid #d8dce6; border-radius: 8px; background: #fff; box-shadow: 0 12px 30px rgba(29, 33, 41, .08); }
+.lock-status-panel { padding: 22px; display: grid; align-content: start; gap: 22px; }
+.lock-status-head { display: flex; align-items: center; gap: 14px; }
+.lock-status-head h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: 0; }
+.lock-status-head span, .locked-job-main span, .locked-job-main small, .lock-metrics span { color: #667085; font-size: 13px; }
+.lock-emblem { width: 58px; height: 58px; border-radius: 8px; display: grid; place-items: center; background: #101828; color: #fff; }
+.lock-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.lock-metrics div { min-height: 78px; border: 1px solid #e5e6eb; border-radius: 8px; padding: 12px; display: grid; align-content: center; gap: 5px; background: #f8fafc; }
+.lock-metrics strong { font-size: 26px; line-height: 1; }
+.unlock-form { display: grid; gap: 12px; padding-top: 6px; border-top: 1px solid #eef2f7; }
+.lock-jobs-panel { min-width: 0; padding: 20px; }
+.locked-job-list { display: grid; gap: 10px; max-height: calc(100vh - 112px); overflow: auto; padding-right: 4px; }
+.locked-job-card { min-height: 82px; display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px; border: 1px solid #e5e6eb; border-radius: 8px; background: #fff; }
+.locked-job-thumb { width: 64px; height: 64px; border-radius: 6px; display: grid; place-items: center; overflow: hidden; background: #f2f4f7; color: #667085; border: 1px solid #e5e6eb; }
+.locked-job-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.locked-job-main { min-width: 0; display: grid; gap: 5px; }
+.locked-job-main strong, .locked-job-main span, .locked-job-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.locked-job-message { color: #344054 !important; }
+.locked-empty { min-height: 320px; display: grid; place-items: center; align-content: center; gap: 10px; color: #667085; border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; }
 
 .workspace { min-width: 0; display: flex; flex-direction: column; }
 .topbar { height: 72px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; background: #fff; border-bottom: 1px solid #e5e6eb; }
@@ -88,6 +111,12 @@ textarea { min-height: 240px; resize: vertical; font-family: "Cascadia Mono", Co
 .payment-pill.free, .payment-pill.paid { background: #ecfdf3; color: #067647; }
 .error-text { display: block; margin-top: 5px; color: #b42318; max-width: 220px; }
 .empty-table { text-align: center !important; color: #86909c; padding: 38px !important; }
+.pagination-bar { min-height: 54px; margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.pagination-summary { display: inline-flex; align-items: center; gap: 6px; color: #4e5969; font-size: 13px; }
+.pagination-summary strong { color: #1f2329; }
+.pagination-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.pagination-controls select { width: 112px; }
+.page-indicator { min-width: 74px; text-align: center; color: #4e5969; font-weight: 700; font-size: 13px; }
 
 .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
 .settings-grid.narrow { max-width: 480px; }

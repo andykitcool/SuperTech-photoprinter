@@ -1,5 +1,17 @@
 ﻿<template>
-  <main v-if="!auth" class="login-screen">
+  <main v-if="!bootReady" class="login-screen">
+    <section class="login-panel boot-panel">
+      <div class="brand-row">
+        <div class="brand-mark">ST</div>
+        <div>
+          <h1>PhotoPrinter</h1>
+          <span>正在检查登录状态...</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <main v-else-if="!auth" class="login-screen">
     <section class="login-panel">
       <div class="brand-row">
         <div class="brand-mark">ST</div>
@@ -28,6 +40,77 @@
         </button>
         <p v-if="messageText" class="form-message error">{{ messageText }}</p>
       </form>
+    </section>
+  </main>
+
+  <main v-else-if="store.locked" class="lock-screen">
+    <section class="lock-status-panel">
+      <div class="lock-status-head">
+        <div class="lock-emblem">
+          <ShieldCheck :size="30" />
+        </div>
+        <div>
+          <h1>打印工作台已锁定</h1>
+          <span>{{ listeningActivityLabel }} · {{ printState.listening ? '监听中' : '未监听' }}</span>
+        </div>
+      </div>
+
+      <div class="lock-metrics">
+        <div>
+          <span>队列任务</span>
+          <strong>{{ activeLockedJobs.length }}</strong>
+        </div>
+        <div>
+          <span>最近成功</span>
+          <strong>{{ lockedSuccessCount }}</strong>
+        </div>
+        <div>
+          <span>最近失败</span>
+          <strong>{{ lockedFailedCount }}</strong>
+        </div>
+      </div>
+
+      <form class="unlock-form" @submit.prevent="unlockWorkstation">
+        <label>
+          <span>解锁密码</span>
+          <input v-model="unlockPassword" type="password" autocomplete="current-password" autofocus />
+        </label>
+        <button class="primary-button" type="submit">
+          <ShieldCheck :size="17" />
+          解锁
+        </button>
+        <p v-if="unlockError" class="form-message error">{{ unlockError }}</p>
+      </form>
+    </section>
+
+    <section class="lock-jobs-panel">
+      <div class="section-head">
+        <div>
+          <h3>打印任务监控</h3>
+          <span>锁定期间仅展示任务状态，不能操作订单或设置</span>
+        </div>
+      </div>
+      <div class="locked-job-list">
+        <article v-for="job in store.recentJobs" :key="job.id" class="locked-job-card">
+          <div class="locked-job-thumb">
+            <img v-if="job.printImageUrl || job.photoUrl" :src="resolveUrl(job.printImageUrl || job.photoUrl)" alt="" />
+            <Printer v-else :size="22" />
+          </div>
+          <div class="locked-job-main">
+            <div>
+              <strong>{{ job.orderNo || `任务 ${job.id}` }}</strong>
+              <span>{{ job.activityName || '未命名活动' }} / {{ job.photoName || '照片任务' }}</span>
+            </div>
+            <small>{{ job.templateName || '默认模版' }} · {{ job.copies || 1 }} 份</small>
+            <small v-if="job.lastMessage" class="locked-job-message">{{ job.lastMessage }}</small>
+          </div>
+          <span class="status-pill" :class="job.status">{{ jobStatusText(job.status) }}</span>
+        </article>
+        <div v-if="!store.recentJobs.length" class="locked-empty">
+          <Printer :size="34" />
+          <span>暂无打印任务</span>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -89,6 +172,10 @@
           <button class="ghost-button" type="button" @click="activeView = 'settings'">
             <Settings :size="17" />
             客户端设置
+          </button>
+          <button class="ghost-button lock-action" type="button" @click="lockWorkstation">
+            <ShieldCheck :size="17" />
+            锁定
           </button>
           <button class="ghost-button danger" type="button" @click="logout">
             <LogOut :size="17" />
@@ -318,8 +405,8 @@
             <span>全部活动订单</span>
           </div>
           <div class="toolbar">
-            <input v-model.trim="orderKeyword" placeholder="搜索订单/用户/节目" @keyup.enter="loadPrintOrders" />
-            <select v-model="orderStatus" @change="loadPrintOrders">
+            <input v-model.trim="orderKeyword" placeholder="搜索订单/用户/节目" @keyup.enter="loadPrintOrders(1)" />
+            <select v-model="orderStatus" @change="loadPrintOrders(1)">
               <option value="">全部状态</option>
               <option value="queued">排队</option>
               <option value="claimed">已领取</option>
@@ -328,7 +415,7 @@
               <option value="success">成功</option>
               <option value="failed">失败</option>
             </select>
-            <button class="secondary-button" type="button" @click="loadPrintOrders">搜索</button>
+            <button class="secondary-button" type="button" @click="loadPrintOrders(1)">搜索</button>
           </div>
         </div>
         <PrintRecordTable
@@ -339,6 +426,24 @@
           @reprint="handleReprint"
           @delete="handleDeletePrintRecord"
         />
+        <div class="pagination-bar">
+          <div class="pagination-summary">
+            <strong>{{ orderTotal }}</strong>
+            <span>条订单 · {{ orderRangeLabel }}</span>
+          </div>
+          <div class="pagination-controls">
+            <select v-model.number="orderPageSize" @change="loadPrintOrders(1)">
+              <option :value="20">20 条/页</option>
+              <option :value="50">50 条/页</option>
+              <option :value="80">80 条/页</option>
+            </select>
+            <button class="secondary-button" type="button" :disabled="orderPage <= 1 || loading" @click="loadPrintOrders(1)">首页</button>
+            <button class="secondary-button" type="button" :disabled="orderPage <= 1 || loading" @click="loadPrintOrders(orderPage - 1)">上一页</button>
+            <span class="page-indicator">{{ orderPage }} / {{ orderTotalPages }}</span>
+            <button class="secondary-button" type="button" :disabled="orderPage >= orderTotalPages || loading" @click="loadPrintOrders(orderPage + 1)">下一页</button>
+            <button class="secondary-button" type="button" :disabled="orderPage >= orderTotalPages || loading" @click="loadPrintOrders(orderTotalPages)">末页</button>
+          </div>
+        </div>
       </section>
 
       <section v-else-if="activeView === 'settings'" class="content-band">
@@ -384,6 +489,10 @@
           <label class="switch-line">
             <input v-model="store.settings.autoStart" type="checkbox" />
             <span>启动后自动监听</span>
+          </label>
+          <label>
+            <span>锁定密码</span>
+            <input v-model="lockPasswordForm" type="password" placeholder="留空则保持当前密码" autocomplete="new-password" />
           </label>
           <div class="button-row full">
             <button class="primary-button" type="submit">保存客户端设置</button>
@@ -590,6 +699,7 @@ type LocalTemplateItem = {
 
 const store = reactive<AppStore>(defaultStore())
 const auth = computed(() => store.auth)
+const bootReady = ref(false)
 const activeView = ref<ViewKey>('activities')
 const activityTab = ref<ActivityTab>('records')
 const activities = ref<Activity[]>([])
@@ -604,6 +714,9 @@ const materialPage = ref(1)
 const materialTotal = ref(0)
 const orderKeyword = ref('')
 const orderStatus = ref('')
+const orderPage = ref(1)
+const orderPageSize = ref(20)
+const orderTotal = ref(0)
 const activityTemplateText = ref('{}')
 const templateConfig = ref<Record<string, unknown>>({})
 const templates = ref<LocalTemplateItem[]>([])
@@ -626,6 +739,9 @@ const credentialError = ref('')
 
 const loginForm = reactive({ username: '', password: '' })
 const passwordForm = reactive({ oldPassword: '', newPassword: '' })
+const lockPasswordForm = ref('')
+const unlockPassword = ref('')
+const unlockError = ref('')
 const activityPrintSettings = reactive<ActivityPrintSettings>({})
 const activityPrintForm = reactive({
   print_free_quota: 0,
@@ -650,9 +766,100 @@ const listeningActivityLabel = computed(() => {
 const materialTypeLabel = computed(() => materialTypeTabs.find((item) => item.value === materialType.value)?.label || '素材')
 const materialCategoryLabel = computed(() => materialType.value === 'sticker' ? (materialCategory.value || '全部分类') : '全部分类')
 const materialHasMore = computed(() => materials.value.length < materialTotal.value)
+const orderTotalPages = computed(() => Math.max(1, Math.ceil(orderTotal.value / orderPageSize.value)))
+const orderRangeLabel = computed(() => {
+  if (!orderTotal.value) return '暂无数据'
+  const start = (orderPage.value - 1) * orderPageSize.value + 1
+  const end = Math.min(orderTotal.value, start + printOrders.value.length - 1)
+  return `${start}-${end}`
+})
+const activeLockedJobs = computed(() => store.recentJobs.filter((job) => !['success', 'failed'].includes(job.status)))
+const lockedSuccessCount = computed(() => store.recentJobs.filter((job) => job.status === 'success').length)
+const lockedFailedCount = computed(() => store.recentJobs.filter((job) => job.status === 'failed').length)
 function friendlyErrorMessage(text: string) {
   if (text === 'Not Found') return '接口未找到，请确认服务端已更新并重启'
   return text
+}
+
+function parseJwtExpiresAt(token: string) {
+  const payload = token.split('.')[1]
+  if (!payload) return null
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const data = JSON.parse(window.atob(padded)) as { exp?: unknown }
+    const exp = Number(data.exp)
+    return Number.isFinite(exp) && exp > 0 ? new Date(exp * 1000).toISOString() : null
+  } catch {
+    return null
+  }
+}
+
+function authExpiresAt(session: AuthSession) {
+  return session.tokenExpiresAt || parseJwtExpiresAt(session.token)
+}
+
+function isAuthExpired(session: AuthSession, skewMs = 10_000) {
+  const expiresAt = authExpiresAt(session)
+  if (!expiresAt) return false
+  const timestamp = Date.parse(expiresAt)
+  return Number.isFinite(timestamp) && timestamp <= Date.now() + skewMs
+}
+
+function isAuthError(error: unknown) {
+  if (error instanceof ApiError && [401, 403].includes(error.status)) return true
+  const text = error instanceof Error ? error.message : String(error)
+  return /invalid token|token.*expired|unauthorized|forbidden/i.test(text)
+}
+
+function resetAuthenticatedState() {
+  stopListening()
+  stopRecordHotRefresh()
+  store.auth = null
+  store.locked = false
+  store.settings.clientToken = ''
+  store.settings.clientTokenExpiresAt = null
+  credentialStatus.value = 'unauthenticated'
+  credentialError.value = ''
+  activeView.value = 'activities'
+  selectedActivity.value = null
+  activityRecords.value = []
+  printOrders.value = []
+  orderPage.value = 1
+  orderTotal.value = 0
+}
+
+async function expireAuthSession(text = '登录已过期，请重新登录') {
+  resetAuthenticatedState()
+  showMessage(text, 'warn')
+  await saveStore()
+}
+
+function jobStatusText(status: string) {
+  return ({
+    queued: '排队',
+    claimed: '已领取',
+    rendering: '渲染中',
+    printing: '打印中',
+    success: '成功',
+    failed: '失败',
+  } as Record<string, string>)[status] || status
+}
+
+async function hashLockPassword(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const bytes = new TextEncoder().encode(trimmed)
+  if (crypto?.subtle) {
+    const digest = await crypto.subtle.digest('SHA-256', bytes)
+    return `sha256:${Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`
+  }
+  let hash = 2166136261
+  for (const byte of bytes) {
+    hash ^= byte
+    hash = Math.imul(hash, 16777619)
+  }
+  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
 function showMessage(text: string, kind: 'ok' | 'error' | 'warn' = 'ok') {
@@ -665,6 +872,10 @@ function showMessage(text: string, kind: 'ok' | 'error' | 'warn' = 'ok') {
 
 function getAuth(): AuthSession {
   if (!store.auth) throw new Error('未登录')
+  if (isAuthExpired(store.auth)) {
+    void expireAuthSession()
+    throw new ApiError(401, '登录已过期，请重新登录')
+  }
   return store.auth
 }
 
@@ -884,6 +1095,10 @@ async function handleApi<T>(task: () => Promise<T>, fallback = '操作失败') {
   try {
     return await task()
   } catch (error) {
+    if (auth.value && isAuthError(error)) {
+      await expireAuthSession()
+      throw error
+    }
     const text = error instanceof ApiError || error instanceof Error ? error.message : String(error)
     showMessage(text || fallback, 'error')
     throw error
@@ -902,6 +1117,8 @@ async function handleLogin() {
       username: data.username,
       permissions: data.permissions || [],
       roleCodes: data.role_codes || [],
+      tokenIssuedAt: new Date().toISOString(),
+      tokenExpiresAt: parseJwtExpiresAt(data.access_token),
     }
     if (!hasPermission('print.manage')) {
       store.auth = null
@@ -948,6 +1165,10 @@ async function ensureClientSession(force = false) {
     await saveStore()
     return true
   } catch (error) {
+    if (isAuthError(error)) {
+      await expireAuthSession()
+      return false
+    }
     credentialStatus.value = 'error'
     credentialError.value = friendlyErrorMessage(error instanceof Error ? error.message : String(error))
     return false
@@ -955,18 +1176,8 @@ async function ensureClientSession(force = false) {
 }
 
 async function logout() {
-  stopListening()
-  store.auth = null
-  store.settings.clientToken = ''
-  store.settings.clientTokenExpiresAt = null
-  credentialStatus.value = 'unauthenticated'
-  credentialError.value = ''
-  activeView.value = 'activities'
-  selectedActivity.value = null
-  activityRecords.value = []
-  printOrders.value = []
+  resetAuthenticatedState()
   messageText.value = ''
-  stopRecordHotRefresh()
   await saveStore()
 }
 
@@ -1215,14 +1426,21 @@ async function saveGlobalPrintSettings() {
   showMessage('云印设置已保存')
 }
 
-async function loadPrintOrders() {
+async function loadPrintOrders(page = orderPage.value) {
+  orderPage.value = Math.max(1, page)
   const data = await handleApi(() => adminApi.getPrintRecords(store.settings, getAuth(), {
-    page: 1,
-    page_size: 80,
+    page: orderPage.value,
+    page_size: orderPageSize.value,
     status: orderStatus.value,
     keyword: orderKeyword.value,
   }), '打印订单加载失败')
   printOrders.value = data?.items || []
+  orderTotal.value = data?.total || 0
+  orderPage.value = data?.page || orderPage.value
+  orderPageSize.value = data?.page_size || orderPageSize.value
+  if (orderTotal.value && orderPage.value > orderTotalPages.value) {
+    await loadPrintOrders(orderTotalPages.value)
+  }
 }
 
 async function refreshRecordsSilently() {
@@ -1233,14 +1451,21 @@ async function refreshRecordsSilently() {
       activityRecords.value = data?.items || []
     } else if (activeView.value === 'orders') {
       const data = await adminApi.getPrintRecords(store.settings, getAuth(), {
-        page: 1,
-        page_size: 80,
+        page: orderPage.value,
+        page_size: orderPageSize.value,
         status: orderStatus.value,
         keyword: orderKeyword.value,
       })
       printOrders.value = data?.items || []
+      orderTotal.value = data?.total || 0
+      orderPage.value = data?.page || orderPage.value
+      orderPageSize.value = data?.page_size || orderPageSize.value
     }
   } catch (error) {
+    if (isAuthError(error)) {
+      await expireAuthSession()
+      return
+    }
     await log('warn', 'record hot refresh failed', { error: error instanceof Error ? error.message : String(error) })
   }
 }
@@ -1313,10 +1538,44 @@ async function loadPrinters() {
 }
 
 async function saveLocalSettings() {
+  if (lockPasswordForm.value.trim()) {
+    if (lockPasswordForm.value.trim().length < 4) {
+      showMessage('锁定密码至少 4 位', 'warn')
+      return
+    }
+    store.settings.lockPasswordHash = await hashLockPassword(lockPasswordForm.value)
+    lockPasswordForm.value = ''
+  }
   await ensureClientSession(true)
   await saveStore()
   showMessage('客户端设置已保存')
   if (printState.listening) startListening()
+}
+
+async function lockWorkstation() {
+  if (!store.settings.lockPasswordHash) {
+    activeView.value = 'settings'
+    showMessage('请先在客户端设置中配置锁定密码', 'warn')
+    return
+  }
+  unlockPassword.value = ''
+  unlockError.value = ''
+  store.locked = true
+  await saveStore()
+}
+
+async function unlockWorkstation() {
+  unlockError.value = ''
+  const hash = await hashLockPassword(unlockPassword.value)
+  if (!hash || hash !== store.settings.lockPasswordHash) {
+    unlockError.value = '密码不正确'
+    unlockPassword.value = ''
+    return
+  }
+  store.locked = false
+  unlockPassword.value = ''
+  await saveStore()
+  showMessage('工作台已解锁')
 }
 
 async function reauthenticateClient() {
@@ -1527,14 +1786,25 @@ watch(() => store.settings.pollingIntervalMs, () => {
 watch([activeView, activityTab, () => selectedActivity.value?.id], startRecordHotRefresh)
 
 onMounted(async () => {
-  await loadStore()
-  credentialStatus.value = store.settings.clientToken ? 'authenticated' : 'unauthenticated'
-  await loadPrinters()
-  if (auth.value) {
-    await ensureClientSession().catch(() => undefined)
-    await loadActivities().catch(() => undefined)
+  try {
+    await loadStore()
+    if (store.auth) {
+      const tokenExpiresAt = authExpiresAt(store.auth)
+      store.auth.tokenExpiresAt = tokenExpiresAt
+      if (isAuthExpired(store.auth)) {
+        await expireAuthSession()
+      }
+    }
+    credentialStatus.value = store.settings.clientToken ? 'authenticated' : 'unauthenticated'
+    await loadPrinters()
+    if (auth.value) {
+      await ensureClientSession().catch(() => undefined)
+      await loadActivities().catch(() => undefined)
+    }
+    startRecordHotRefresh()
+  } finally {
+    bootReady.value = true
   }
-  startRecordHotRefresh()
 })
 
 onUnmounted(() => {

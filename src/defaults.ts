@@ -17,6 +17,7 @@ export function defaultSettings(): LocalSettings {
     copiesFallback: 1,
     retryLimit: 1,
     autoStart: false,
+    lockPasswordHash: '',
   }
 }
 
@@ -25,6 +26,7 @@ export function defaultStore(): AppStore {
     auth: null,
     settings: defaultSettings(),
     recentJobs: [],
+    locked: false,
   }
 }
 
@@ -37,5 +39,6 @@ export function mergeStore(input: unknown): AppStore {
   if (!base.settings.clientId) base.settings.clientId = defaultSettings().clientId
   if (!base.settings.clientName) base.settings.clientName = defaultSettings().clientName
   if (Array.isArray(data.recentJobs)) base.recentJobs = data.recentJobs.slice(0, 100)
+  base.locked = Boolean(data.locked)
   return base
 }
