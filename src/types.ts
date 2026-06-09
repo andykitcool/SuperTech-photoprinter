@@ -29,6 +29,7 @@ export type LocalSettings = {
   scaleMode: 'contain' | 'cover'
   copiesFallback: number
   retryLimit: number
+  maxConcurrentJobs: number
   autoStart: boolean
   lockPasswordHash: string
 }
@@ -101,7 +102,7 @@ export type DecorationMaterialItem = {
 export type PrintSettings = {
   print_free_quota?: number
   print_price?: number
-  print_render_mode?: 'frontend' | 'server'
+  print_render_mode?: 'frontend' | 'client' | 'server'
   print_render_multiplier?: 1 | 2 | 3
   print_dispatch_mode?: 'lankuo' | 'local_client'
   lankuo_print_config?: Record<string, unknown>
@@ -125,6 +126,10 @@ export type PrintJob = {
   photoName: string
   photoUrl?: string | null
   printImageUrl?: string | null
+  renderImageUrl?: string | null
+  renderMode?: 'client' | 'server'
+  renderStatus?: 'not_required' | 'waiting_payment' | 'pending' | 'rendering' | 'ready' | 'failed'
+  renderSha256?: string | null
   templateId: string
   templateName?: string
   paperName?: string

@@ -16,6 +16,7 @@ export function defaultSettings(): LocalSettings {
     scaleMode: 'contain',
     copiesFallback: 1,
     retryLimit: 1,
+    maxConcurrentJobs: 1,
     autoStart: false,
     lockPasswordHash: '',
   }

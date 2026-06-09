@@ -245,7 +245,7 @@ export const printClientApi = {
       body: JSON.stringify({
         client_id: settings.clientId,
         client_name: settings.clientName,
-        version: '0.1.0',
+        version: '0.2.0',
       }),
     })
   },
@@ -264,13 +264,49 @@ export const printClientApi = {
       settings,
       method: 'POST',
       headers: { 'X-Print-Client-Token': settings.clientToken },
-      body: JSON.stringify({ client_id: settings.clientId, activity_id: activityId }),
+      body: JSON.stringify({
+        client_id: settings.clientId,
+        activity_id: activityId,
+        capabilities: ['server_render_v1'],
+      }),
     })
     return data.job
   },
 
-  async uploadRenderedImage(settings: LocalSettings, jobId: string, imageData: string, localJobId?: string) {
-    const imageBlob = await fetch(imageData).then((response) => response.blob())
+  async downloadRenderedImage(settings: LocalSettings, job: PrintJob) {
+    const path = job.renderImageUrl || `/api/print-client/jobs/${job.id}/rendered-image`
+    const url = /^https?:\/\//i.test(path)
+      ? path
+      : `${settings.serverUrl.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 60000)
+    try {
+      const response = await fetch(url, {
+        headers: { 'X-Print-Client-Token': settings.clientToken },
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        const detail = await response.text()
+        throw new ApiError(response.status, detail || `HTTP ${response.status}`)
+      }
+      const contentType = (response.headers.get('content-type') || '').split(';', 1)[0].toLowerCase()
+      if (contentType !== 'image/png') throw new ApiError(0, `服务端合成图格式错误：${contentType || '未知'}`)
+      const blob = await response.blob()
+      if (!blob.size || blob.size > 50 * 1024 * 1024) throw new ApiError(0, `服务端合成图大小异常：${blob.size} bytes`)
+      return {
+        blob,
+        sha256: response.headers.get('x-content-sha256') || job.renderSha256 || '',
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error
+      if (error instanceof DOMException && error.name === 'AbortError') throw new ApiError(0, '下载服务端合成图超时')
+      throw new ApiError(0, error instanceof Error ? error.message : '下载服务端合成图失败')
+    } finally {
+      window.clearTimeout(timer)
+    }
+  },
+
+  async uploadRenderedImageBlob(settings: LocalSettings, jobId: string, imageBlob: Blob, localJobId?: string) {
     const formData = new FormData()
     formData.append('client_id', settings.clientId)
     if (localJobId) formData.append('local_job_id', localJobId)

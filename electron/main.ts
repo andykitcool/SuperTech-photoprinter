@@ -37,7 +37,9 @@ process.on('unhandledRejection', (reason) => {
 })
 
 type PrintImagePayload = {
-  dataUrl: string
+  imageData?: ArrayBuffer | Uint8Array
+  mimeType?: string
+  dataUrl?: string
   printerName?: string
   copies?: number
   widthPx?: number
@@ -49,6 +51,8 @@ type PrintImagePayload = {
 }
 
 const MAX_PRINT_DATA_URL_BYTES = 90 * 1024 * 1024
+const MAX_PRINT_IMAGE_BYTES = 70 * 1024 * 1024
+let printQueue = Promise.resolve()
 
 type PrinterInfo = {
   name: string
@@ -158,6 +162,27 @@ function dataUrlToImageFile(dataUrl: string) {
     ext: ext || 'png',
     buffer: Buffer.from(match[2], 'base64'),
   }
+}
+
+function payloadToImageFile(payload: PrintImagePayload) {
+  if (payload.imageData) {
+    const buffer = payload.imageData instanceof ArrayBuffer
+      ? Buffer.from(new Uint8Array(payload.imageData))
+      : Buffer.from(payload.imageData)
+    if (!buffer.length || buffer.length > MAX_PRINT_IMAGE_BYTES) {
+      throw new Error('Printable image data size is out of range')
+    }
+    const mimeType = (payload.mimeType || 'image/png').toLowerCase()
+    if (!['image/png', 'image/jpeg', 'image/jpg'].includes(mimeType)) {
+      throw new Error(`Unsupported printable image type: ${mimeType}`)
+    }
+    return {
+      ext: mimeType === 'image/png' ? 'png' : 'jpg',
+      buffer,
+    }
+  }
+  if (payload.dataUrl) return dataUrlToImageFile(payload.dataUrl)
+  throw new Error('Missing printable image data')
 }
 
 function comparablePrinterName(name: string) {
@@ -292,7 +317,7 @@ try {
 }
 
 async function printImage(payload: PrintImagePayload) {
-  if (!payload?.dataUrl?.startsWith('data:image/')) {
+  if (!payload?.imageData && !payload?.dataUrl?.startsWith('data:image/')) {
     throw new Error('Missing printable image data')
   }
   if (payload.widthPx && (payload.widthPx < 1 || payload.widthPx > 8000)) {
@@ -304,7 +329,7 @@ async function printImage(payload: PrintImagePayload) {
 
   const localJobId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`
   const jobDir = userDataPath('print-jobs', localJobId)
-  const { ext, buffer } = dataUrlToImageFile(payload.dataUrl)
+  const { ext, buffer } = payloadToImageFile(payload)
   const imagePath = path.join(jobDir, `print.${ext}`)
 
   await fs.mkdir(jobDir, { recursive: true })
@@ -478,7 +503,9 @@ ipcMain.handle('printer:list', async (event) => {
 
 ipcMain.handle('printer:print-image', async (_event, payload: PrintImagePayload) => {
   try {
-    return await printImage(payload)
+    const queuedPrint = printQueue.then(() => printImage(payload))
+    printQueue = queuedPrint.then(() => undefined, () => undefined)
+    return await queuedPrint
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     await appendLog({

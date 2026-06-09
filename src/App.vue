@@ -145,6 +145,7 @@
         </div>
         <span class="muted">{{ credentialLabel }}</span>
         <span class="muted">{{ listeningActivityLabel }}</span>
+        <span v-if="activeJobsCount" class="muted">处理中：{{ activeJobsCount }} 个任务</span>
         <button
           class="listen-button"
           type="button"
@@ -471,6 +472,10 @@
             <input v-model.number="store.settings.retryLimit" type="number" min="0" max="5" />
           </label>
           <label>
+            <span>最大并发任务</span>
+            <input v-model.number="store.settings.maxConcurrentJobs" type="number" min="1" max="4" />
+          </label>
+          <label>
             <span>默认打印机</span>
             <select v-model="store.settings.selectedPrinter">
               <option value="">系统默认</option>
@@ -736,6 +741,9 @@ const printState = reactive<LocalPrintState>({ listening: false, busy: false })
 const listeningActivity = ref<Activity | null>(null)
 const credentialStatus = ref<'unknown' | 'authenticated' | 'unauthenticated' | 'error'>('unknown')
 const credentialError = ref('')
+const activeJobs = new Map<string, Promise<void>>()
+const activeJobsCount = ref(0)
+const maxConcurrentJobs = computed(() => Math.max(1, Math.min(4, Number(store.settings.maxConcurrentJobs || 1))))
 
 const loginForm = reactive({ username: '', password: '' })
 const passwordForm = reactive({ oldPassword: '', newPassword: '' })
@@ -957,7 +965,7 @@ function createPhotoSlots(width: number, height: number, photoCount: number) {
 function createCanvasJson(width: number, height: number, photoCount: number) {
   const slots = createPhotoSlots(width, height, photoCount)
   return {
-    version: '6.6.1',
+    version: '7.3.1',
     background: '#ffffff',
     objects: slots.map((slot) => ({
       type: 'rect',
@@ -1088,6 +1096,11 @@ function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): P
       },
     )
   })
+}
+
+async function sha256Blob(blob: Blob) {
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
 }
 
 async function handleApi<T>(task: () => Promise<T>, fallback = '操作失败') {
@@ -1319,7 +1332,7 @@ async function previewTemplateItem(item: LocalTemplateItem) {
     widthPx: item.width,
     heightPx: item.height,
   }, store.settings.serverUrl))
-  previewImage.value = result.dataUrl
+  previewImage.value = result.dataUrl || ''
 }
 
 async function previewEditingTemplate() {
@@ -1340,7 +1353,7 @@ async function previewActivityTemplate() {
     widthPx: payload.canvasWidth || 1800,
     heightPx: payload.canvasHeight || 1200,
   }, store.settings.serverUrl))
-  previewImage.value = result.dataUrl
+  previewImage.value = result.dataUrl || ''
 }
 
 function selectMaterialType(value: MaterialType) {
@@ -1610,28 +1623,43 @@ async function processJob(job: PrintJob) {
     try {
       job.attempts = attempt
       job.status = 'rendering'
-      job.lastMessage = '正在渲染图片'
+      job.lastMessage = job.renderMode === 'server' ? '正在下载服务端合成图' : '正在渲染图片'
       upsertRecentJob(job)
       await printClientApi.report(store.settings, job.id, 'rendering', job.lastMessage)
-      const render = await withTimeout(
-        renderFabricToPng(renderInputFromJob(job, store.settings.serverUrl)),
-        60000,
-        '渲染超时，请检查模版素材是否能访问',
-      )
-      if (!uploadedPrintImageUrl) {
-        job.lastMessage = '正在上传合成图'
-        upsertRecentJob(job)
-        try {
-          const uploadResult = await printClientApi.uploadRenderedImage(store.settings, job.id, render.dataUrl)
-          uploadedPrintImageUrl = uploadResult.print_image_url
-          job.printImageUrl = uploadedPrintImageUrl
-        } catch (uploadError) {
-          const uploadText = uploadError instanceof Error ? uploadError.message : String(uploadError)
-          await log('warn', 'print render upload skipped before local print', {
-            jobId: job.id,
-            orderNo: job.orderNo,
-            error: uploadText,
-          })
+      let imageBlob: Blob
+      let imageWidth = job.widthPx
+      let imageHeight = job.heightPx
+      if (job.renderMode === 'server') {
+        if (job.renderStatus !== 'ready') throw new Error(`服务端合成图尚未就绪：${job.renderStatus || 'unknown'}`)
+        const downloaded = await printClientApi.downloadRenderedImage(store.settings, job)
+        const actualHash = await sha256Blob(downloaded.blob)
+        const expectedHash = (downloaded.sha256 || job.renderSha256 || '').toLowerCase()
+        if (expectedHash && actualHash !== expectedHash) throw new Error('服务端合成图 SHA-256 校验失败')
+        imageBlob = downloaded.blob
+      } else {
+        const render = await withTimeout(
+          renderFabricToPng(renderInputFromJob(job, store.settings.serverUrl)),
+          60000,
+          '渲染超时，请检查模版素材是否能访问',
+        )
+        imageBlob = render.blob
+        imageWidth = render.widthPx
+        imageHeight = render.heightPx
+        if (!uploadedPrintImageUrl) {
+          job.lastMessage = '正在上传合成图'
+          upsertRecentJob(job)
+          try {
+            const uploadResult = await printClientApi.uploadRenderedImageBlob(store.settings, job.id, render.blob)
+            uploadedPrintImageUrl = uploadResult.print_image_url
+            job.printImageUrl = uploadedPrintImageUrl
+          } catch (uploadError) {
+            const uploadText = uploadError instanceof Error ? uploadError.message : String(uploadError)
+            await log('warn', 'print render upload skipped before local print', {
+              jobId: job.id,
+              orderNo: job.orderNo,
+              error: uploadText,
+            })
+          }
         }
       }
       job.status = 'printing'
@@ -1645,20 +1673,22 @@ async function processJob(job: PrintJob) {
         ? { widthMm: job.paperWidthMm, heightMm: job.paperHeightMm }
         : undefined
       const templatePaper = !jobPaper
-        ? findTemplatePaperSize(job.templateId, render.widthPx, render.heightPx)
+        ? findTemplatePaperSize(job.templateId, imageWidth, imageHeight)
         : undefined
       const fallbackPaper = (!jobPaper && !templatePaper)
-        ? resolvePaperMm(render.widthPx, render.heightPx)
+        ? resolvePaperMm(imageWidth, imageHeight)
         : undefined
       const paperSize = jobPaper || templatePaper || fallbackPaper
 
       printAttempted = true
+      const imageData = await imageBlob.arrayBuffer()
       const printResult = await withTimeout(window.photoPrinter.printImage({
-        dataUrl: render.dataUrl,
+        imageData,
+        mimeType: imageBlob.type || 'image/png',
         printerName: store.settings.selectedPrinter,
         copies: job.copies || store.settings.copiesFallback || 1,
-        widthPx: render.widthPx,
-        heightPx: render.heightPx,
+        widthPx: imageWidth,
+        heightPx: imageHeight,
         paperWidthMm: paperSize?.widthMm,
         paperHeightMm: paperSize?.heightMm,
         dpi: job.dpi || 300,
@@ -1717,6 +1747,9 @@ async function pollOnce() {
     showMessage('监听已停止：未选择活动', 'warn')
     return
   }
+  // Respect concurrency limit – skip claiming if already at capacity.
+  if (activeJobsCount.value >= maxConcurrentJobs.value) return
+
   printState.busy = true
   try {
     const credentialOk = await ensureClientSession()
@@ -1724,19 +1757,30 @@ async function pollOnce() {
     await printClientApi.heartbeat(store.settings, {
       activity_id: listeningActivity.value.id,
       activity_name: listeningActivity.value.name,
-      version: '0.1.0',
+      version: '0.2.0',
       printer_name: store.settings.selectedPrinter,
       queue_length: store.recentJobs.filter((item) => !['success', 'failed'].includes(item.status)).length,
       status: 'online',
+      capabilities: ['server_render_v1'],
     })
     printState.lastHeartbeat = new Date().toISOString()
+
+    // If we reached concurrency limit during heartbeat, stop here.
+    if (activeJobsCount.value >= maxConcurrentJobs.value) return
+
     const job = await printClientApi.claim(store.settings, listeningActivity.value.id)
     if (job) {
       job.status = 'claimed'
       job.lastMessage = '已领取订单'
       upsertRecentJob(job)
-      await processJob(job)
-      await refreshCurrent()
+      // Start processing in the background – non-blocking.
+      activeJobsCount.value = activeJobs.size + 1
+      const promise = processJob(job).finally(() => {
+        activeJobs.delete(job.id)
+        activeJobsCount.value = activeJobs.size
+        void refreshCurrent().catch(() => undefined)
+      })
+      activeJobs.set(job.id, promise)
     }
     printState.lastError = ''
   } catch (error) {

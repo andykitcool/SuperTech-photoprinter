@@ -2,9 +2,10 @@ import { FabricImage, StaticCanvas } from 'fabric'
 import type { PrintJob, PrintTemplate } from '../types'
 
 export type RenderResult = {
-  dataUrl: string
+  dataUrl?: string
   widthPx: number
   heightPx: number
+  blob: Blob
 }
 
 export type RenderInput = {
@@ -13,10 +14,23 @@ export type RenderInput = {
   heightPx: number
   smoothingMode?: 'auto' | 'quality' | 'pixel'
   baseUrl?: string
+  includeDataUrl?: boolean
 }
 
 const ASSET_CHECK_TIMEOUT_MS = 8000
+const ASSET_CACHE_MAX_ENTRIES = 48
+const ASSET_CACHE_MAX_BYTES = 64 * 1024 * 1024
 const OMIT_FABRIC_OBJECT = Symbol('omit-fabric-object')
+
+type AssetCacheEntry = {
+  promise: Promise<Blob>
+  blob?: Blob
+  size: number
+  lastUsed: number
+}
+
+const assetCache = new Map<string, AssetCacheEntry>()
+let assetCacheBytes = 0
 
 function normalizeAssetUrl(value: string, baseUrl?: string) {
   if (!baseUrl || value.startsWith('data:') || value.startsWith('http://') || value.startsWith('https://') || value.startsWith('blob:')) {
@@ -83,45 +97,117 @@ function shortAssetUrl(url: string) {
   }
 }
 
-async function assertImageAssetAccessible(url: string) {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), ASSET_CHECK_TIMEOUT_MS)
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      cache: 'no-store',
-      credentials: 'omit',
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-    const contentType = response.headers.get('content-type') || ''
-    if (contentType && !contentType.toLowerCase().startsWith('image/')) {
-      throw new Error(`content-type ${contentType}`)
-    }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`模版素材访问超时：${shortAssetUrl(url)}`)
-    }
-    const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`模版素材无法访问：${shortAssetUrl(url)}${message ? `（${message}）` : ''}`)
-  } finally {
-    window.clearTimeout(timer)
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error('读取图片数据失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function enforceAssetCacheLimit(protectedUrl?: string) {
+  const candidates = Array.from(assetCache.entries())
+    .filter(([url, entry]) => url !== protectedUrl && entry.blob)
+    .sort(([, left], [, right]) => left.lastUsed - right.lastUsed)
+
+  while (
+    candidates.length
+    && (assetCache.size > ASSET_CACHE_MAX_ENTRIES || assetCacheBytes > ASSET_CACHE_MAX_BYTES)
+  ) {
+    const [url, entry] = candidates.shift()!
+    if (assetCache.delete(url)) assetCacheBytes -= entry.size
   }
 }
 
-async function validateImageAssets(value: unknown) {
-  const urls = Array.from(collectImageAssetUrls(value))
-  if (!urls.length) return
+async function downloadAsset(url: string): Promise<Blob> {
+  const cached = assetCache.get(url)
+  if (cached) {
+    cached.lastUsed = Date.now()
+    return cached.promise
+  }
 
-  const results = await Promise.allSettled(urls.map((url) => assertImageAssetAccessible(url)))
-  const failures = results.filter((item): item is PromiseRejectedResult => item.status === 'rejected')
-  if (!failures.length) return
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), ASSET_CHECK_TIMEOUT_MS)
+  const entry: AssetCacheEntry = {
+    promise: Promise.resolve(new Blob()),
+    size: 0,
+    lastUsed: Date.now(),
+  }
+  entry.promise = (async () => {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        cache: 'default',
+        credentials: 'omit',
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+        throw new Error(`非图片类型：${contentType}`)
+      }
+      const blob = await response.blob()
+      entry.blob = blob
+      entry.size = blob.size
+      entry.lastUsed = Date.now()
+      assetCacheBytes += blob.size
+      enforceAssetCacheLimit(url)
+      return blob
+    } catch (error) {
+      if (assetCache.get(url) === entry) assetCache.delete(url)
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error(`模版素材访问超时：${shortAssetUrl(url)}`)
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`模版素材无法访问：${shortAssetUrl(url)}（${message}）`)
+    } finally {
+      window.clearTimeout(timer)
+    }
+  })()
+  assetCache.set(url, entry)
+  enforceAssetCacheLimit(url)
+  return entry.promise
+}
 
-  const first = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason)
-  const more = failures.length > 1 ? `；另有 ${failures.length - 1} 个素材也无法访问` : ''
-  throw new Error(`${first}${more}`)
+async function preloadAndInjectAssets(json: unknown): Promise<() => void> {
+  const urls = Array.from(collectImageAssetUrls(json))
+  if (!urls.length) return () => undefined
+
+  const objectUrls = new Map<string, string>()
+  const results = await Promise.allSettled(urls.map(async (url) => {
+    const blob = await downloadAsset(url)
+    objectUrls.set(url, URL.createObjectURL(blob))
+  }))
+
+  const failures = results
+    .map((item) => ({ status: item.status, reason: item.status === 'rejected' ? item.reason : null }))
+    .filter((item) => item.status === 'rejected')
+
+  if (failures.length) {
+    objectUrls.forEach((url) => URL.revokeObjectURL(url))
+    const first = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason)
+    const more = failures.length > 1 ? `；另有 ${failures.length - 1} 个素材也无法访问` : ''
+    throw new Error(`${first}${more}`)
+  }
+
+  walkAndInjectAssets(json, objectUrls)
+  return () => objectUrls.forEach((url) => URL.revokeObjectURL(url))
+}
+
+function walkAndInjectAssets(value: unknown, objectUrls: Map<string, string>): void {
+  if (Array.isArray(value)) {
+    value.forEach((item) => walkAndInjectAssets(item, objectUrls))
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  const source = value as Record<string, unknown>
+  const type = String(source.type || '').toLowerCase()
+  if (type === 'image' && typeof source.src === 'string') {
+    const objectUrl = objectUrls.get(source.src)
+    if (objectUrl) source.src = objectUrl
+  }
+  Object.values(source).forEach((item) => walkAndInjectAssets(item, objectUrls))
 }
 
 function parseCanvasJson(value: string | Record<string, unknown>) {
@@ -165,27 +251,31 @@ export async function renderFabricToPng(input: RenderInput): Promise<RenderResul
     enableRetinaScaling: false,
   })
 
+  let releaseAssets: () => void = () => undefined
   try {
     configureSmoothing(canvas, input.smoothingMode)
     const prepared = prepareFabricJson(parseCanvasJson(input.canvasJson), input.baseUrl)
-    await validateImageAssets(prepared)
+    releaseAssets = await preloadAndInjectAssets(prepared)
     await canvas.loadFromJSON(prepared as Record<string, unknown>)
+    releaseAssets()
+    releaseAssets = () => undefined
     if (document.fonts?.ready) await document.fonts.ready
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     normalizeImageObjects(canvas, input.smoothingMode)
     canvas.setDimensions({ width: widthPx, height: heightPx })
     canvas.setZoom(1)
     canvas.renderAll()
-    return {
-      dataUrl: canvas.toDataURL({
-        format: 'png',
-        multiplier: 1,
-        enableRetinaScaling: false,
-      }),
-      widthPx,
-      heightPx,
-    }
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      element.toBlob((b) => {
+        if (b) resolve(b)
+        else reject(new Error('toBlob 生成失败'))
+      }, 'image/png')
+    })
+    const dataUrl = input.includeDataUrl === false ? undefined : await blobToDataUrl(blob)
+
+    return { dataUrl, blob, widthPx, heightPx }
   } finally {
+    releaseAssets()
     canvas.dispose()
   }
 }
@@ -197,6 +287,7 @@ export function renderInputFromJob(job: PrintJob, baseUrl?: string): RenderInput
     heightPx: job.heightPx || 1200,
     smoothingMode: job.smoothingMode || 'auto',
     baseUrl,
+    includeDataUrl: false,
   }
 }
 

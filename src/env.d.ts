@@ -4,7 +4,7 @@ export type NativeBridge = {
   loadStore: () => Promise<unknown>
   saveStore: (store: unknown) => Promise<{ ok: boolean }>
   getPrinters: () => Promise<Array<Record<string, unknown>>>
-  printImage: (payload: unknown) => Promise<{ ok: boolean }>
+  printImage: (payload: unknown) => Promise<{ ok: boolean; localJobId?: string }>
   writeLog: (entry: unknown) => Promise<{ ok: boolean }>
   openLogs: () => Promise<{ ok: boolean }>
 }
